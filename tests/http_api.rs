@@ -218,10 +218,14 @@ fn head(addr: &str, path: &str) -> (u16, String, String) {
 }
 
 fn post_json(addr: &str, path: &str, body: &str) -> (u16, String, String) {
+    post_json_headers(addr, path, body, "")
+}
+
+fn post_json_headers(addr: &str, path: &str, body: &str, extra: &str) -> (u16, String, String) {
     http(
         addr,
         &format!(
-            "POST {path} HTTP/1.1\r\nHost: loc\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: loc\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}\r\n{body}",
             body.len()
         ),
     )
@@ -384,9 +388,10 @@ fn post_consent_escape_idempotency_etag() {
         "/api/messages",
         r#"{"body":"<script>alert(1)</script>","public":true,"request_id":"k1"}"#,
     );
-    assert!(c == 200 || c == 201, "{b2}");
+    assert_eq!(c, 200, "{b2}");
     let v2: serde_json::Value = serde_json::from_str(&b2).unwrap();
     assert_eq!(v2["replay"], true);
+    assert_eq!(v2["id"], v["items"][0]["id"]);
     let (c, _, _) = post_json(
         &s.addr,
         "/api/messages",
@@ -407,6 +412,63 @@ fn post_consent_escape_idempotency_etag() {
     );
     assert_eq!(c, 304);
     assert!(b.is_empty());
+}
+
+#[test]
+fn strict_json_duplicate_keys_and_public_type() {
+    let s = start(false);
+    let before = get(&s.addr, "/api/messages");
+    assert_eq!(before.0, 200);
+    let n0 = serde_json::from_str::<serde_json::Value>(&before.2).unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .len();
+    let e0 = serde_json::from_str::<serde_json::Value>(&get(&s.addr, "/healthz").2).unwrap();
+    let ev0 = e0.get("capacity").and_then(|c| c.get("events")).and_then(|x| x.as_i64());
+
+    for raw in [
+        r#"{"body":"a","public":true,"body":"b"}"#,
+        r#"{"body":"a","public":true,"body":"a"}"#,
+        r#"{"public":true,"body":"x","public":true}"#,
+        r#"{"body":"x","request_id":"d1","public":true,"request_id":"d1"}"#,
+        r#"{"body":"x","request_id":"d1","public":true,"request_id":"d2"}"#,
+        r#"{"public":true,"public":true,"body":"x"}"#,
+    ] {
+        let (c, _, b) = post_json(&s.addr, "/api/messages", raw);
+        assert_eq!(c, 400, "{raw} -> {b}");
+        assert!(b.contains("duplicate_field"), "{b}");
+    }
+    for raw in [
+        r#"{"body":"x","public":"true"}"#,
+        r#"{"body":"x","public":1}"#,
+        r#"{"body":"x","public":false}"#,
+    ] {
+        let (c, _, b) = post_json(&s.addr, "/api/messages", raw);
+        assert_eq!(c, 400, "{raw} -> {b}");
+        assert!(b.contains("public_required"), "{b}");
+    }
+    let after = get(&s.addr, "/api/messages");
+    let n1 = serde_json::from_str::<serde_json::Value>(&after.2).unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(n1, n0);
+    let e1 = serde_json::from_str::<serde_json::Value>(&get(&s.addr, "/healthz").2).unwrap();
+    if let (Some(a), Some(b)) = (ev0, e1.get("capacity").and_then(|c| c.get("events")).and_then(|x| x.as_i64())) {
+        assert_eq!(a, b, "duplicate JSON must not insert events");
+    }
+
+    let (c, _, b) = post_json(
+        &s.addr,
+        "/a2a",
+        r#"{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"messageId":"dup-pub","role":"user","parts":[{"kind":"data","data":{"skill":"post_public_message","public":true,"public":true,"body":"nope"}}]}}}"#,
+    );
+    assert!(b.contains("duplicate_field"), "{c} {b}");
+    let n2 = serde_json::from_str::<serde_json::Value>(&get(&s.addr, "/api/messages").2).unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(n2, n0);
 }
 
 #[test]
@@ -558,6 +620,41 @@ fn a2a_jsonrpc_list_post_and_unsupported() {
 
     let (c, _, _) = get(&s.addr, "/a2a");
     assert_eq!(c, 405);
+
+    let (c, _, b) = post_json(
+        &s.addr,
+        "/a2a",
+        r#"{"jsonrpc":"2.0","id":7,"method":"tasks/get","params":{"id":"m999999"}}"#,
+    );
+    assert_eq!(c, 200, "{b}");
+    let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(v["error"]["code"], -32001);
+
+    let (c, _, b) = post_json(
+        &s.addr,
+        "/a2a",
+        r#"{"jsonrpc":"2.0","id":8,"method":"agent/register","params":{}}"#,
+    );
+    assert_eq!(c, 200, "{b}");
+    let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(v["error"]["code"], -32601);
+
+    let (c, _, b) = post_json(
+        &s.addr,
+        "/a2a",
+        r#"{"jsonrpc":"2.0","id":9,"method":"message/send","params":{"message":{"messageId":"dup","role":"user","parts":[]}},"method":"message/send"}"#,
+    );
+    assert_eq!(c, 400, "{b}");
+    assert!(b.contains("duplicate_field"), "{b}");
+
+    let (c, _, b) = post_json(
+        &s.addr,
+        "/a2a",
+        r#"{"jsonrpc":"2.0","id":10,"method":"message/send","params":{"message":{"messageId":"pubstr","role":"user","parts":[{"kind":"data","data":{"skill":"post_public_message","public":"true","body":"nope"}}]}}}"#,
+    );
+    assert_eq!(c, 200, "{b}");
+    let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(v["error"]["message"], "public_required");
 }
 
 #[test]
@@ -1444,4 +1541,108 @@ fn paging_html_has_newer_after_cursor() {
     let (c, _, html) = get(&s.addr, &format!("/?after={min}"));
     assert_eq!(c, 200);
     assert!(html.contains("Newer") || html.contains("after="), "{html}");
+}
+
+#[test]
+fn origin_write_fairness_and_untrusted_xff() {
+    let s = spawn(Spawn {
+        unlimited_writes: false,
+        ..Spawn::default()
+    });
+    let a = |i: u8| {
+        post_json_headers(
+            &s.addr,
+            "/api/messages",
+            &format!(r#"{{"body":"oa{i}","public":true,"request_id":"oa{i}"}}"#),
+            "CF-Connecting-IP: 203.0.113.10\r\n",
+        )
+    };
+    let (c, _, b) = a(1);
+    assert_eq!(c, 201, "{b}");
+    let (c, _, b) = a(2);
+    assert_eq!(c, 201, "{b}");
+    let (c, _, b) = a(3);
+    assert_eq!(c, 429, "{b}");
+    assert!(b.contains("origin_write_quota") || b.contains("write_quota"), "{b}");
+    let (c, _, b) = post_json_headers(
+        &s.addr,
+        "/api/messages",
+        r#"{"body":"ob1","public":true,"request_id":"ob1"}"#,
+        "CF-Connecting-IP: 203.0.113.20\r\n",
+    );
+    assert_eq!(c, 201, "{b}");
+
+    let s2 = spawn(Spawn {
+        unlimited_writes: false,
+        ..Spawn::default()
+    });
+    let (c, _, b) = post_json_headers(
+        &s2.addr,
+        "/api/messages",
+        r#"{"body":"xff1","public":true,"request_id":"xff1"}"#,
+        "X-Forwarded-For: 198.51.100.1\r\n",
+    );
+    assert_eq!(c, 201, "{b}");
+    let (c, _, b) = post_json_headers(
+        &s2.addr,
+        "/api/messages",
+        r#"{"body":"xff2","public":true,"request_id":"xff2"}"#,
+        "X-Forwarded-For: 198.51.100.2\r\n",
+    );
+    assert_eq!(c, 201, "{b}");
+
+    let s3 = spawn(Spawn {
+        unlimited_writes: false,
+        ..Spawn::default()
+    });
+    let a2a_post = |i: u8| {
+        post_json_headers(
+            &s3.addr,
+            "/a2a",
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":{i},"method":"message/send","params":{{"message":{{"messageId":"oa2a{i}","role":"user","parts":[{{"kind":"data","data":{{"skill":"post_public_message","public":true,"body":"oa2a{i}","request_id":"oa2a{i}"}}}}]}}}}}}"#
+            ),
+            "CF-Connecting-IP: 203.0.113.30\r\n",
+        )
+    };
+    let (c, _, b) = a2a_post(1);
+    assert_eq!(c, 200, "{b}");
+    let (c, _, b) = a2a_post(2);
+    assert_eq!(c, 200, "{b}");
+    let (c, _, b) = a2a_post(3);
+    assert_eq!(c, 429, "{b}");
+    assert!(b.contains("origin_write_quota"), "{b}");
+}
+
+#[test]
+fn ops_export_is_consistent_event_batch() {
+    let s = start(false);
+    let (c, _, b) = post_json(
+        &s.addr,
+        "/api/messages",
+        r#"{"body":"ex1","public":true,"request_id":"ex1"}"#,
+    );
+    assert_eq!(c, 201, "{b}");
+    let (c, _, b) = get(&s.addr, "/ops/export?from=1&limit=20");
+    assert_eq!(c, 200, "{b}");
+    let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert!(v["count"].as_u64().unwrap() >= 1);
+    assert_eq!(v["events"][0]["body"], "ex1");
+    assert_eq!(v["condition_version"], "baseline");
+    assert!(v["message_id_min"].as_i64().unwrap() >= 1);
+    let (_c, _, b) = get(&s.addr, "/healthz");
+    let h: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert!(h["capacity"]["messages"].as_i64().unwrap() >= 1);
+    assert_eq!(h["capacity"]["archive_hint"], "ok");
+
+    let (c, _, b) = http(
+        &s.addr,
+        "GET /healthz HTTP/1.1\r\nHost: loc\r\nConnection: close\r\nCF-Connecting-IP: 203.0.113.9\r\n\r\n",
+    );
+    assert_eq!(c, 404, "{b}");
+    let (c, _, b) = http(
+        &s.addr,
+        "GET /ops/export?from=1 HTTP/1.1\r\nHost: loc\r\nConnection: close\r\nCF-Connecting-IP: 203.0.113.9\r\n\r\n",
+    );
+    assert_eq!(c, 404, "{b}");
 }

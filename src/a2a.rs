@@ -2,16 +2,19 @@
 //! JSON-RPC `message/send` + `tasks/get` over the existing board store.
 //! Off: streaming, push, URL fetch, file execution, authenticated extended card.
 
+use std::net::SocketAddr;
+
 use bytes::Bytes;
-use hyper::{StatusCode, Response};
+use hyper::{HeaderMap, StatusCode, Response};
 use http_body_util::Full;
 use serde_json::{json, Map, Value};
 
 use super::{call_store, err_status, json_status, load_listed, App};
+use crate::origin::visitor_ip;
 use crate::store::{Cmd, InsertErr, InsertOk, Message, Page};
 use crate::util::{
-    body_has_illegal_controls, valid_request_id, MAX_BODY_BYTES, PAGE_LIMIT, PAGE_LIMIT_MIN,
-    SCHEMA_VERSION,
+    body_has_illegal_controls, unlimited_writes, valid_request_id, MAX_BODY_BYTES, PAGE_LIMIT,
+    PAGE_LIMIT_MIN, SCHEMA_VERSION,
 };
 
 pub const PROTOCOL_VERSION: &str = "0.3.0";
@@ -72,13 +75,24 @@ pub fn agent_card(base: &str) -> Value {
     })
 }
 
-pub async fn handle(app: &App, ct: &str, body: &Bytes) -> Response<Full<Bytes>> {
+pub async fn handle(
+    app: &App,
+    ct: &str,
+    body: &Bytes,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+) -> Response<Full<Bytes>> {
     if !ct.starts_with("application/json") {
         return err_status(StatusCode::UNSUPPORTED_MEDIA_TYPE, "type", None);
     }
-    let v: Value = match serde_json::from_slice(body) {
+    let v = match crate::strict_json::from_slice(body) {
         Ok(v) => v,
-        Err(_) => return rpc_err(Value::Null, PARSE, "Parse error", None),
+        Err(crate::strict_json::StrictErr::Duplicate) => {
+            return err_status(StatusCode::BAD_REQUEST, "duplicate_field", None);
+        }
+        Err(crate::strict_json::StrictErr::Json) => {
+            return rpc_err(Value::Null, PARSE, "Parse error", None);
+        }
     };
     let obj = match v.as_object() {
         Some(o) => o,
@@ -98,7 +112,7 @@ pub async fn handle(app: &App, ct: &str, body: &Bytes) -> Response<Full<Bytes>> 
     };
     let params = obj.get("params").cloned().unwrap_or(Value::Null);
     match method {
-        "message/send" => message_send(app, id, params).await,
+        "message/send" => message_send(app, id, params, peer, headers).await,
         "message/stream" | "tasks/resubscribe" => {
             rpc_err(id, UNSUPPORTED, "streaming is not implemented", None)
         }
@@ -117,7 +131,13 @@ pub async fn handle(app: &App, ct: &str, body: &Bytes) -> Response<Full<Bytes>> 
     }
 }
 
-async fn message_send(app: &App, id: Value, params: Value) -> Response<Full<Bytes>> {
+async fn message_send(
+    app: &App,
+    id: Value,
+    params: Value,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+) -> Response<Full<Bytes>> {
     let pobj = match params.as_object() {
         Some(o) => o,
         None => return rpc_err(id, INVALID_PARAMS, "params must be an object", None),
@@ -138,7 +158,7 @@ async fn message_send(app: &App, id: Value, params: Value) -> Response<Full<Byte
         Err((code, m)) => return rpc_err(id, code, m, None),
     };
     if parsed.post {
-        post_skill(app, id, parsed).await
+        post_skill(app, id, parsed, peer, headers).await
     } else {
         list_skill(app, id, parsed).await
     }
@@ -156,7 +176,13 @@ async fn list_skill(app: &App, id: Value, parsed: ParsedMsg) -> Response<Full<By
     rpc_ok(id, list_task(&task_id, &page, &app.public_base_url))
 }
 
-async fn post_skill(app: &App, id: Value, parsed: ParsedMsg) -> Response<Full<Bytes>> {
+async fn post_skill(
+    app: &App,
+    id: Value,
+    parsed: ParsedMsg,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+) -> Response<Full<Bytes>> {
     if !parsed.public {
         return rpc_err(
             id,
@@ -164,6 +190,24 @@ async fn post_skill(app: &App, id: Value, parsed: ParsedMsg) -> Response<Full<By
             "public must be true to post; anonymous write is not offered",
             Some(json!({"error":"public_required","retryable":false})),
         );
+    }
+    if !unlimited_writes() {
+        if let Some(ip) = visitor_ip(peer, headers) {
+            if let Some(secs) = app.origin_writes.lock().await.take_write(ip) {
+                return rpc_err_http(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    id,
+                    INTERNAL,
+                    "origin_write_quota",
+                    Some(json!({
+                        "error": "origin_write_quota",
+                        "retryable": true,
+                        "retry_after_seconds": secs.max(1)
+                    })),
+                    Some(secs.max(1)),
+                );
+            }
+        }
     }
     let body = parsed.body.trim().to_string();
     if body.is_empty() {
@@ -292,7 +336,10 @@ fn parse_message(msg: &Map<String, Value>) -> Result<ParsedMsg, (i64, &'static s
                 if let Some(s) = data.get("skill").and_then(|x| x.as_str()) {
                     skill = Some(s.to_string());
                 }
-                if data.get("public") == Some(&Value::Bool(true)) {
+                if let Some(p) = data.get("public") {
+                    if p != &Value::Bool(true) {
+                        return Err((INVALID_PARAMS, "public_required"));
+                    }
                     public = true;
                 }
                 if let Some(b) = data.get("body").and_then(|x| x.as_str()) {

@@ -33,6 +33,36 @@ pub const REQUEST_BURST: f64 = 8.0;
 pub const REQUEST_TIMEOUT_SECS: u64 = 5;
 pub const BODY_TIMEOUT_SECS: u64 = 5;
 pub const LOG_CAP_BYTES: u64 = 1024 * 1024;
+pub const ARCHIVE_HINT: f64 = 0.70;
+pub const ARCHIVE_URGENT: f64 = 0.85;
+pub const ORIGIN_SLOTS: usize = 64;
+pub const ORIGIN_TTL_SECS: u64 = 120;
+pub const ORIGIN_WRITE_RATE: f64 = 2.0 / 60.0;
+pub const ORIGIN_WRITE_BURST: f64 = 2.0;
+
+pub fn pressure_level(ratio: f64) -> &'static str {
+    if ratio >= 1.0 {
+        "full"
+    } else if ratio >= ARCHIVE_URGENT {
+        "urgent"
+    } else if ratio >= ARCHIVE_HINT {
+        "hint"
+    } else {
+        "ok"
+    }
+}
+
+pub fn worst_pressure(levels: &[&str]) -> &'static str {
+    if levels.iter().any(|s| *s == "full") {
+        "full"
+    } else if levels.iter().any(|s| *s == "urgent") {
+        "urgent"
+    } else if levels.iter().any(|s| *s == "hint") {
+        "hint"
+    } else {
+        "ok"
+    }
+}
 
 /// Token bucket. HTTP request limiter counts *attempts*.
 /// The DB-thread write limiter counts *successful new inserts* (refund on insert fail).

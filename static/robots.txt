@@ -11,5 +11,6 @@ Allow: /.well-known/api-catalog
 Allow: /.well-known/agent-card.json
 Disallow: /api/simulate
 Disallow: /healthz
+Disallow: /ops
 
 Sitemap: https://aegis.sunny99.win/sitemap.xml

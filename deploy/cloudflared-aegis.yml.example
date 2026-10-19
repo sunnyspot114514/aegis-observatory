@@ -12,6 +12,9 @@ ingress:
     path: ^/healthz/?$
     service: http_status:404
   - hostname: aegis.sunny99.win
+    path: ^/ops/.*$
+    service: http_status:404
+  - hostname: aegis.sunny99.win
     path: ^/api/simulate/?$
     service: http_status:404
   - hostname: aegis.sunny99.win

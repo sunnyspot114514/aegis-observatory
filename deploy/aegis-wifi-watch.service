@@ -1,0 +1,12 @@
+[Unit]
+Description=AEGIS optional Wi-Fi UUID activate when down
+After=NetworkManager.service
+# Not installed until confirmed. Does not restart cloudflared.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/aegis-wifi-watch.sh
+EnvironmentFile=-/etc/aegis/wifi-watch.env
+# wifi-watch.env contains only AEGIS_WIFI_UUID=...  Never a PSK.
+Nice=10
+TimeoutStartSec=40

@@ -2,8 +2,10 @@ mod accept;
 mod config;
 mod elog;
 mod http;
+mod origin;
 mod simulate;
 mod store;
+mod strict_json;
 mod util;
 
 use std::net::SocketAddr;
@@ -113,6 +115,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         inflight: AtomicUsize::new(0),
         write_inflight: AtomicUsize::new(0),
         requests: Mutex::new(Bucket::new(REQUEST_RATE, REQUEST_BURST)),
+        origin_writes: Mutex::new(crate::origin::OriginTable::new()),
         sim_enabled: cfg.simulate_enabled,
         canary: cfg.simulate_canary.clone(),
         public_base_url: cfg.public_base_url.clone(),
@@ -140,7 +143,7 @@ async fn run(cfg: Config) -> Result<(), String> {
             }
             acc = listener.accept() => {
                 match acc {
-                    Ok((stream, _)) => {
+                    Ok((stream, peer)) => {
                         resource_streak = 0;
                         let Some(slot) = ConnSlot::try_acquire(&conns, max_conn) else {
                             drop(stream);
@@ -155,7 +158,7 @@ async fn run(cfg: Config) -> Result<(), String> {
                             let io = TokioIo::new(stream);
                             let svc = service_fn(move |req| {
                                 let app = app.clone();
-                                async move { handle(req, app).await }
+                                async move { handle(req, app, peer).await }
                             });
                             let mut http = hyper::server::conn::http1::Builder::new();
                             http.timer(TokioTimer::new())

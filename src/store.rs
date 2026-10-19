@@ -6,9 +6,9 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 use crate::util::{
-    available_bytes, dir_size, utc_now, Bucket, CONDITION_VERSION, DATA_DIR_BUDGET, DB_MAX_PAGES,
-    DB_PAGE_SIZE, MAX_EVENTS, MAX_MESSAGES, MAX_SIM_EVENTS, MIN_FREE_BYTES, PAGE_LIMIT, WRITE_BURST,
-    WRITE_RATE,
+    available_bytes, dir_size, pressure_level, utc_now, worst_pressure, Bucket, CONDITION_VERSION,
+    DATA_DIR_BUDGET, DB_MAX_PAGES, DB_PAGE_SIZE, MAX_EVENTS, MAX_MESSAGES, MAX_SIM_EVENTS,
+    MIN_FREE_BYTES, PAGE_LIMIT, WRITE_BURST, WRITE_RATE,
 };
 
 #[derive(Debug, Clone)]
@@ -55,6 +55,39 @@ pub struct Health {
     pub readable: bool,
     pub writable: bool,
     pub write_reason: String,
+    pub capacity: Capacity,
+}
+
+#[derive(Debug, Clone)]
+pub struct Capacity {
+    pub messages: i64,
+    pub events: i64,
+    pub data_dir_bytes: u64,
+    pub db_pages: i64,
+    pub disk_free: Option<u64>,
+    pub archive_hint: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportBatch {
+    pub instance_id: String,
+    pub condition_version: String,
+    pub from_seq: i64,
+    pub to_seq: i64,
+    pub events: Vec<ExportEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportEvent {
+    pub event_seq: i64,
+    pub created_at: String,
+    pub source_kind: String,
+    pub action: String,
+    pub result: String,
+    pub condition_version: String,
+    pub message_id: Option<i64>,
+    pub body: Option<String>,
+    pub request_id: Option<String>,
 }
 
 pub enum Cmd {
@@ -72,6 +105,11 @@ pub enum Cmd {
     },
     Health {
         resp: tokio::sync::oneshot::Sender<Health>,
+    },
+    Export {
+        from_seq: i64,
+        limit: i64,
+        resp: tokio::sync::oneshot::Sender<Result<ExportBatch, String>>,
     },
     SimEvent {
         session: String,
@@ -175,7 +213,18 @@ fn db_loop(db_path: PathBuf, data_dir: PathBuf, instance_id: String, rx: mpsc::R
                     readable,
                     writable,
                     write_reason,
+                    capacity: capacity_of(&conn, &data_dir),
                 });
+            }
+            Cmd::Export {
+                from_seq,
+                limit,
+                resp,
+            } => {
+                if resp.is_closed() {
+                    continue;
+                }
+                let _ = resp.send(export_batch(&conn, &instance_id, from_seq, limit));
             }
             Cmd::SimEvent {
                 session,
@@ -215,6 +264,7 @@ fn cmd_closed(cmd: &Cmd) -> bool {
         Cmd::List { resp, .. } => resp.is_closed(),
         Cmd::Insert { resp, .. } => resp.is_closed(),
         Cmd::Health { resp } => resp.is_closed(),
+        Cmd::Export { resp, .. } => resp.is_closed(),
         Cmd::SimEvent { resp, .. } => resp.is_closed(),
     }
 }
@@ -347,6 +397,92 @@ fn write_allowed(conn: &Connection, data_dir: &Path) -> Result<(), InsertErr> {
         return Err(InsertErr::Full);
     }
     Ok(())
+}
+
+fn capacity_of(conn: &Connection, data_dir: &Path) -> Capacity {
+    let messages: i64 = conn
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap_or(0);
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .unwrap_or(0);
+    let data_dir_bytes = dir_size(data_dir);
+    let db_pages: i64 = conn
+        .pragma_query_value(None, "page_count", |r| r.get(0))
+        .unwrap_or(0);
+    let disk_free = available_bytes(data_dir).ok();
+    let msg_r = messages as f64 / MAX_MESSAGES as f64;
+    let ev_r = events as f64 / MAX_EVENTS as f64;
+    let dir_r = data_dir_bytes as f64 / DATA_DIR_BUDGET as f64;
+    let db_r = db_pages as f64 / DB_MAX_PAGES as f64;
+    let disk_r = match disk_free {
+        Some(free) if free > 0 => (MIN_FREE_BYTES as f64 / free as f64).min(2.0),
+        Some(_) => 1.0,
+        None => 0.0,
+    };
+    let archive_hint = worst_pressure(&[
+        pressure_level(msg_r),
+        pressure_level(ev_r),
+        pressure_level(dir_r),
+        pressure_level(db_r),
+        pressure_level(disk_r),
+    ])
+    .to_string();
+    Capacity {
+        messages,
+        events,
+        data_dir_bytes,
+        db_pages,
+        disk_free,
+        archive_hint,
+    }
+}
+
+fn export_batch(
+    conn: &Connection,
+    instance_id: &str,
+    from_seq: i64,
+    limit: i64,
+) -> Result<ExportBatch, String> {
+    let limit = limit.clamp(1, 100);
+    let from_seq = from_seq.max(1);
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.event_seq, e.created_at, e.source_kind, e.action, e.result,
+                    e.condition_version, e.message_id, m.body, m.request_id
+             FROM events e
+             LEFT JOIN messages m ON m.id = e.message_id
+             WHERE e.instance_id=?1 AND e.event_seq>=?2
+             ORDER BY e.event_seq ASC LIMIT ?3",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![instance_id, from_seq, limit], |r| {
+            Ok(ExportEvent {
+                event_seq: r.get(0)?,
+                created_at: r.get(1)?,
+                source_kind: r.get(2)?,
+                action: r.get(3)?,
+                result: r.get(4)?,
+                condition_version: r.get(5)?,
+                message_id: r.get(6)?,
+                body: r.get(7)?,
+                request_id: r.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut events = Vec::new();
+    for r in rows {
+        events.push(r.map_err(|e| e.to_string())?);
+    }
+    let to_seq = events.last().map(|e| e.event_seq).unwrap_or(from_seq.saturating_sub(1));
+    Ok(ExportBatch {
+        instance_id: instance_id.to_string(),
+        condition_version: CONDITION_VERSION.to_string(),
+        from_seq,
+        to_seq,
+        events,
+    })
 }
 
 fn list_messages(

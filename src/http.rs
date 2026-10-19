@@ -14,7 +14,8 @@ use tokio::sync::{Mutex, oneshot};
 
 use crate::elog::{elog, note_4xx};
 use crate::simulate::Simulator;
-use crate::store::{Cmd, InsertErr, Page, Store};
+use crate::origin::{visitor_ip, OriginTable};
+use crate::store::{Cmd, ExportBatch, InsertErr, Page, Store};
 use crate::util::{
     body_has_illegal_controls, env_usize, html_escape, unlimited_writes, valid_request_id, Bucket,
     BODY_TIMEOUT_SECS, MAX_BODY_BYTES, MAX_FORM_REQUEST_BYTES, MAX_INFLIGHT, MAX_REQUEST_BYTES,
@@ -38,6 +39,7 @@ pub struct App {
     pub inflight: AtomicUsize,
     pub write_inflight: AtomicUsize,
     pub requests: Mutex<Bucket>,
+    pub origin_writes: Mutex<OriginTable>,
     pub sim_enabled: bool,
     pub canary: String,
     pub public_base_url: String,
@@ -53,6 +55,7 @@ impl Drop for Inflight<'_> {
 pub async fn handle(
     req: Request<Incoming>,
     app: Arc<App>,
+    peer: std::net::SocketAddr,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let inflight_cap = env_usize("AEGIS_MAX_INFLIGHT", MAX_INFLIGHT);
     if app.inflight.load(Ordering::SeqCst) >= inflight_cap {
@@ -64,10 +67,10 @@ pub async fn handle(
     }
     app.inflight.fetch_add(1, Ordering::SeqCst);
     let _g = Inflight(&app.inflight);
-    Ok(dispatch(req, &app).await)
+    Ok(dispatch(req, &app, peer).await)
 }
 
-async fn dispatch(req: Request<Incoming>, app: &App) -> Response<Full<Bytes>> {
+async fn dispatch(req: Request<Incoming>, app: &App, peer: std::net::SocketAddr) -> Response<Full<Bytes>> {
     let uri = req.uri().clone();
     let raw = uri
         .path_and_query()
@@ -94,6 +97,17 @@ async fn dispatch(req: Request<Incoming>, app: &App) -> Response<Full<Bytes>> {
         if !unlimited_writes() {
             if let Some(secs) = app.requests.lock().await.take() {
                 return err_status(StatusCode::TOO_MANY_REQUESTS, "rate", Some(secs.max(1)));
+            }
+            if path == "/api/messages" {
+                if let Some(ip) = visitor_ip(peer, &headers) {
+                    if let Some(secs) = app.origin_writes.lock().await.take_write(ip) {
+                        return err_status(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "origin_write_quota",
+                            Some(secs.max(1)),
+                        );
+                    }
+                }
             }
         }
         let write_cap = env_usize("AEGIS_MAX_WRITE_INFLIGHT", MAX_WRITE_INFLIGHT);
@@ -144,7 +158,7 @@ async fn dispatch(req: Request<Incoming>, app: &App) -> Response<Full<Bytes>> {
         return match path.as_str() {
             "/api/messages" => post_message(app, &ct, &collected).await,
             "/api/simulate" => post_simulate(app, &ct, &collected).await,
-            "/a2a" => a2a::handle(app, &ct, &collected).await,
+            "/a2a" => a2a::handle(app, &ct, &collected, peer, &headers).await,
             _ => err_status(StatusCode::NOT_FOUND, "not_found", None),
         };
     }
@@ -161,7 +175,18 @@ async fn dispatch(req: Request<Incoming>, app: &App) -> Response<Full<Bytes>> {
     match path.as_str() {
         "/" => page_home(app, &query, head, inm.as_deref()).await,
         "/api/messages" => page_messages(app, &query, head, inm.as_deref()).await,
-        "/healthz" => healthz(app, head).await,
+        "/healthz" => {
+            if public_edge(&headers) {
+                return err_status(StatusCode::NOT_FOUND, "not_found", None);
+            }
+            healthz(app, head).await
+        }
+        "/ops/export" => {
+            if public_edge(&headers) {
+                return err_status(StatusCode::NOT_FOUND, "not_found", None);
+            }
+            ops_export(app, &query, head).await
+        }
         "/agent.txt" => static_text(
             head,
             include_str!("../static/agent.txt"),
@@ -356,12 +381,87 @@ async fn healthz(app: &App, head: bool) -> Response<Full<Bytes>> {
                 },
                 "error_log_dropped": crate::elog::dropped(),
                 "error_log_full": crate::elog::cap_exhausted(),
-                "http_4xx": crate::elog::fourxx()
+                "http_4xx": crate::elog::fourxx(),
+                "capacity": {
+                    "messages": h.capacity.messages,
+                    "messages_max": crate::util::MAX_MESSAGES,
+                    "events": h.capacity.events,
+                    "events_max": crate::util::MAX_EVENTS,
+                    "data_dir_bytes": h.capacity.data_dir_bytes,
+                    "data_dir_budget": crate::util::DATA_DIR_BUDGET,
+                    "db_pages": h.capacity.db_pages,
+                    "db_pages_max": crate::util::DB_MAX_PAGES,
+                    "disk_free_bytes": h.capacity.disk_free,
+                    "archive_hint": h.capacity.archive_hint,
+                    "archive_hint_at": crate::util::ARCHIVE_HINT,
+                    "archive_urgent_at": crate::util::ARCHIVE_URGENT
+                }
             }),
             "health",
         ),
         _ => err_status(StatusCode::SERVICE_UNAVAILABLE, "unavailable", Some(1)),
     }
+}
+
+async fn ops_export(app: &App, query: &str, head: bool) -> Response<Full<Bytes>> {
+    let mut from_seq = 1i64;
+    let mut limit = 50i64;
+    for part in query.split('&').filter(|s| !s.is_empty()) {
+        let (k, v) = part.split_once('=').unwrap_or((part, ""));
+        match k {
+            "from" => {
+                from_seq = v.parse().unwrap_or(1).max(1);
+            }
+            "limit" => {
+                limit = v.parse().unwrap_or(50).clamp(1, 100);
+            }
+            _ => return err_status(StatusCode::BAD_REQUEST, "unknown_query", None),
+        }
+    }
+    match call_store(app, |resp| Cmd::Export {
+        from_seq,
+        limit,
+        resp,
+    })
+    .await
+    {
+        Ok(Ok(batch)) => {
+            static_json(head, export_json(&batch), "ops-export")
+        }
+        Ok(Err(e)) => err_status(StatusCode::BAD_REQUEST, &e, None),
+        Err(r) => r,
+    }
+}
+
+fn public_edge(headers: &hyper::HeaderMap) -> bool {
+    // Tunnel always peers from loopback. A CF-Connecting-IP header means this
+    // request came through the connector: do not serve ops/healthz on that path.
+    headers.get("cf-connecting-ip").is_some()
+}
+
+fn export_json(batch: &ExportBatch) -> Value {
+    let ids: Vec<i64> = batch.events.iter().filter_map(|e| e.message_id).collect();
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "instance_id": batch.instance_id,
+        "condition_version": batch.condition_version,
+        "from_seq": batch.from_seq,
+        "to_seq": batch.to_seq,
+        "count": batch.events.len(),
+        "message_id_min": ids.iter().min(),
+        "message_id_max": ids.iter().max(),
+        "events": batch.events.iter().map(|e| json!({
+            "event_seq": e.event_seq,
+            "created_at": e.created_at,
+            "source_kind": e.source_kind,
+            "action": e.action,
+            "result": e.result,
+            "condition_version": e.condition_version,
+            "message_id": e.message_id,
+            "body": e.body,
+            "request_id": e.request_id
+        })).collect::<Vec<_>>()
+    })
 }
 
 async fn page_messages(
@@ -674,8 +774,15 @@ struct ParsedPost {
 #[allow(clippy::result_large_err)]
 fn parse_post(ct: &str, raw: &Bytes) -> Result<ParsedPost, Response<Full<Bytes>>> {
     if ct.starts_with("application/json") {
-        let v: Value = serde_json::from_slice(raw)
-            .map_err(|_| err_status(StatusCode::BAD_REQUEST, "json", None))?;
+        let v = match crate::strict_json::from_slice(raw) {
+            Ok(v) => v,
+            Err(crate::strict_json::StrictErr::Duplicate) => {
+                return Err(err_status(StatusCode::BAD_REQUEST, "duplicate_field", None));
+            }
+            Err(crate::strict_json::StrictErr::Json) => {
+                return Err(err_status(StatusCode::BAD_REQUEST, "json", None));
+            }
+        };
         let obj: &Map<String, Value> = v
             .as_object()
             .ok_or_else(|| err_status(StatusCode::BAD_REQUEST, "json_object", None))?;
@@ -1099,7 +1206,7 @@ fn openapi_json(base: &str) -> Value {
                         "409": {"description": "request_id_conflict"},
                         "413": {"description": "body_too_large"},
                         "415": {"description": "unsupported type"},
-                        "429": {"description": "rate or write_quota; retryable=true; Retry-After"},
+                        "429": {"description": "rate, write_quota, or origin_write_quota; retryable=true; Retry-After"},
                         "503": {"description": "busy/queue; retryable=true; Retry-After"},
                         "507": {"description": "full/disk; retryable=false; do not retry every second"}
                     }
