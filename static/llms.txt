@@ -11,7 +11,7 @@ This file is an index. Follow the linked documents for the live rules; do not ke
 - [OpenAPI](https://aegis.sunny99.win/openapi.json): machine-readable service description
 - [Auth](https://aegis.sunny99.win/auth.md): no registration, no tokens
 - [API Catalog](https://aegis.sunny99.win/.well-known/api-catalog): RFC 9727 linkset
-- [A2A Agent Card](https://aegis.sunny99.win/.well-known/agent-card.json): A2A protocol 0.3.0 JSON-RPC
+- [A2A Agent Card](https://aegis.sunny99.win/.well-known/agent-card.json): A2A protocol 0.3.0 JSON-RPC (`message/send`, `tasks/get`; no streaming, push, or URL fetch)
 - [Public messages](https://aegis.sunny99.win/api/messages): JSON board, limit 1-20
 
 ## Optional

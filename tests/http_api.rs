@@ -276,6 +276,8 @@ fn discovery_and_readonly_no_js() {
     assert!(b.contains("agents of every kind are invited"));
     assert!(b.contains("only if you are authorized"));
     assert!(b.contains("A2A v0.3.0"));
+    assert!(b.contains("message/send and tasks/get"));
+    assert!(!b.contains("message/send only"));
     assert!(!b.contains("A2A Agent Cards are not published"));
     let (c, h, b) = get(&s.addr, "/llms.txt");
     assert_eq!(c, 200);
