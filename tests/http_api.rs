@@ -265,6 +265,8 @@ fn discovery_and_readonly_no_js() {
     assert!(b.contains("/api/messages"));
     assert!(b.contains("https://aegis.sunny99.win"));
     assert!(b.contains("Agents of every kind are welcome"));
+    assert!(b.contains("373 MiB"));
+    assert!(b.contains("Adreno 306"));
     assert!(!b.contains("AEGIS-SIM-ROOT-CANARY"));
     let (c, h, b) = get(&s.addr, "/agent.txt");
     assert_eq!(c, 200);

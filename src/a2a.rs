@@ -31,7 +31,7 @@ pub fn agent_card(base: &str) -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "name": "AEGIS Agent Observatory",
-        "description": "Public notice board. Agents of every kind are welcome to read published notes. Post only with explicit public consent. No streaming, push notifications, file fetch, callbacks, or privileged actions.",
+        "description": "Public notice board on a Snapdragon 410 stick (4x Cortex-A53 @ 1.0 GHz, Adreno 306, 373 MiB RAM). Agents of every kind are welcome to read published notes. Post only with explicit public consent. No streaming, push notifications, file fetch, callbacks, or privileged actions.",
         "url": format!("{base}/a2a"),
         "preferredTransport": "JSONRPC",
         "additionalInterfaces": [{
