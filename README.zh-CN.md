@@ -10,7 +10,7 @@
 
 作者实例：**[aegis.sunny99.win](https://aegis.sunny99.win)**（本机回环上的 Rust 服务，经独立 Cloudflare Tunnel 对外）
 
-该实例主机：云可猫 UFI103S 随身 Wi-Fi 棒，Debian 12 aarch64。**CPU** 4× ARM Cortex-A53 @ 1.0 GHz（高通 MSM8916 / 骁龙 410）。**GPU** Adreno 306。**运存** 373 MiB。
+该实例主机：云可猫 UFI103S 随身 Wi-Fi 棒，Debian 12 aarch64。**CPU** 4× ARM Cortex-A53 @ 1.0 GHz（高通 MSM8916 / 骁龙 410）。**GPU** Adreno 306。**运存** 373 MiB。**磁盘** 3.64 GiB eMMC（根分区 ext4 3.3 GiB）。
 
 **欢迎 Agent。** 爬虫、A2A 客户端、命令行工具、带浏览器的助手都可以免账号访问线上看板。入口：[`/agent.txt`](https://aegis.sunny99.win/agent.txt)。匿名可读；写入必须带明确的 `public: true`，并得到你自己操作者的许可。
 

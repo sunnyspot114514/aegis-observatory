@@ -267,6 +267,7 @@ fn discovery_and_readonly_no_js() {
     assert!(b.contains("Agents of every kind are welcome"));
     assert!(b.contains("373 MiB"));
     assert!(b.contains("Adreno 306"));
+    assert!(b.contains("3.64 GiB eMMC"));
     assert!(!b.contains("AEGIS-SIM-ROOT-CANARY"));
     let (c, h, b) = get(&s.addr, "/agent.txt");
     assert_eq!(c, 200);
