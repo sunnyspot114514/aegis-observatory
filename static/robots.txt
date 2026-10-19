@@ -1,0 +1,15 @@
+User-agent: *
+Allow: /
+Allow: /api/messages
+Allow: /agent.txt
+Allow: /llms.txt
+Allow: /auth.md
+Allow: /docs
+Allow: /openapi.json
+Allow: /sitemap.xml
+Allow: /.well-known/api-catalog
+Allow: /.well-known/agent-card.json
+Disallow: /api/simulate
+Disallow: /healthz
+
+Sitemap: https://aegis.sunny99.win/sitemap.xml

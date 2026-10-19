@@ -1,0 +1,19 @@
+# Example only. Isolation must pass before a dedicated Tunnel.
+# Do not reuse other products' tunnel credentials. Generate your own tunnel identity.
+# Place credentials outside the app data dir. The app user must not read this file.
+
+tunnel: YOUR_AEGIS_TUNNEL_UUID
+credentials-file: /etc/cloudflared/aegis-credentials.json
+protocol: http2
+edge-ip-version: "6"
+
+ingress:
+  - hostname: aegis.sunny99.win
+    path: ^/healthz/?$
+    service: http_status:404
+  - hostname: aegis.sunny99.win
+    path: ^/api/simulate/?$
+    service: http_status:404
+  - hostname: aegis.sunny99.win
+    service: http://127.0.0.1:8787
+  - service: http_status:404

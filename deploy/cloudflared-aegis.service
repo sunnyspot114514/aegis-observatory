@@ -1,0 +1,27 @@
+[Unit]
+Description=AEGIS dedicated Cloudflare Tunnel
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/
+After=network-online.target aegis.service
+# Do not After= or Want= other products' tunnels.
+
+[Service]
+Type=notify
+User=cloudflared
+Group=cloudflared
+WorkingDirectory=/var/lib/cloudflared
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate --config /etc/cloudflared/aegis.yml tunnel run
+Restart=on-failure
+RestartSec=5
+# Type=notify waits for edge READY; default 90s start timeout kills retries during WAN blips.
+TimeoutStartSec=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/etc/cloudflared
+ReadWritePaths=/var/lib/cloudflared
+RestrictSUIDSGID=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

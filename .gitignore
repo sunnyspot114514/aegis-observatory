@@ -1,0 +1,12 @@
+/target
+/data
+/tmp
+*.sqlite
+*.sqlite-journal
+.env
+/config.toml
+cloudflared-credentials.json
+*.pem
+error.log
+*.sha256
+/dist

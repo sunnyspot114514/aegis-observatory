@@ -1,0 +1,54 @@
+# Example only. Do not copy secrets into this file.
+# Do not create users from this file. Provision the service account separately.
+# Isolation: deploy/ISOLATION_PROPOSAL.md (iptables-legacy; nft retired).
+
+[Unit]
+Description=AEGIS Agent Observatory
+After=network.target
+# Do not After= or Want= AgentHub / Devspace / cloudflared-global.
+
+[Service]
+Type=simple
+User=aegis
+Group=aegis
+WorkingDirectory=/var/lib/aegis
+ExecStart=/usr/local/bin/aegis-observatory --config /etc/aegis/config.toml
+# Forbidden in deploy: --dev, Environment=AEGIS_SKIP_DISK_CHECK=1, Environment=AEGIS_DEV=1,
+# Environment=AEGIS_DISK_QUERY=fail, Environment=AEGIS_UNLIMITED_WRITES=1.
+# Disk protection must stay enabled. Startup must print disk_protection=enabled.
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+# MemoryMax=40M is a candidate after on-device RSS, not a default. Do not set it
+# until idle/concurrent measurements exist; OOM is worse than a round number.
+RestrictAddressFamilies=AF_INET AF_INET6
+# systemd IPAddress*= still allows loopback connect(). iptables-legacy owner DROP must
+# drop aegis-originated NEW connections including to 127.0.0.1. Do not treat this as outbound deny.
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1/32
+IPAddressAllow=::1/128
+ReadWritePaths=/var/lib/aegis
+# ConfigurationDirectory= is not itself a security guarantee, and is not always unsafe.
+# systemd 252: if the directory does not exist, it is created owned by the service user;
+# if it already exists, systemd leaves ownership alone. We create /etc/aegis ourselves
+# (root:aegis 0750, config 0640) and verify aegis cannot write config or the binary.
+ReadOnlyPaths=/etc/aegis
+# Omit paths that do not exist. systemd 252 NAMESPACE fails if an InaccessiblePaths
+# target is missing. /etc/cloudflared is added via drop-in once that directory exists.
+InaccessiblePaths=/etc/ssh /root /home /run/user
+
+[Install]
+WantedBy=multi-user.target

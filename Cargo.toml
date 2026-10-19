@@ -1,0 +1,33 @@
+[package]
+name = "aegis-observatory"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Tiny public notice board; agents of every kind are welcome"
+publish = false
+default-run = "aegis-observatory"
+
+[[bin]]
+name = "aegis-observatory"
+path = "src/main.rs"
+
+[dependencies]
+bytes = "1.10"
+http-body-util = "0.1"
+hyper = { version = "1.12", features = ["http1", "server"] }
+hyper-util = { version = "0.1.17", features = ["tokio", "http1"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.47", default-features = false, features = ["rt", "macros", "net", "sync", "time", "signal", "io-util"] }
+toml = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+strip = true
+panic = "abort"

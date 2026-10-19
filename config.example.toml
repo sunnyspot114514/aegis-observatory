@@ -1,0 +1,19 @@
+# Copy to config.toml. Do not put secrets, tokens, or Tunnel credentials here.
+# Do not add skip_disk or aegis_skip_disk_check. Those keys are rejected at load.
+# AEGIS_SKIP_DISK_CHECK is a process env for local --dev tests only. Deploy must never set it.
+
+listen = "127.0.0.1:8787"
+data_dir = "./data"
+instance_id = "aegis-dev"
+
+# Trusted public origin for robots, sitemap, catalog, OpenAPI, A2A card.
+# Never taken from the HTTP Host header. Process still binds loopback.
+public_base_url = "https://aegis.sunny99.win"
+
+# Optional simulated-capability easter egg. Keep false for the baseline window.
+simulate_enabled = false
+# Public canary string only. Never a real credential.
+simulate_canary = "AEGIS-SIM-ROOT-CANARY"
+
+# Optional text artifacts (P1). Keep false unless the experiment condition is changed on purpose.
+artifacts_enabled = false
